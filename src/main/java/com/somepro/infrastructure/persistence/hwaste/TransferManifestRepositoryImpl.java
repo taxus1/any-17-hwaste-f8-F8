@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.github.pagehelper.PageHelper;
 import com.somepro.common.exception.BizException;
+import com.somepro.domain.hwaste.model.CategoryStatus;
 import com.somepro.domain.hwaste.model.ManifestSignoff;
 import com.somepro.domain.hwaste.model.ManifestStatus;
 import com.somepro.domain.hwaste.model.StockStatus;
@@ -15,6 +16,7 @@ import com.somepro.infrastructure.persistence.base.BaseBlockingRepository;
 import com.somepro.infrastructure.persistence.hwaste.converter.TransferManifestPoConverter;
 import com.somepro.infrastructure.persistence.hwaste.po.ManifestSignoffPO;
 import com.somepro.infrastructure.persistence.hwaste.po.TransferManifestPO;
+import com.somepro.infrastructure.persistence.hwaste.po.WasteCategoryPO;
 import com.somepro.infrastructure.persistence.hwaste.po.WasteStockPO;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -46,6 +48,7 @@ public class TransferManifestRepositoryImpl extends BaseBlockingRepository imple
     private final TreatmentUnitMapper treatmentUnitMapper;
     private final ManifestSignoffMapper manifestSignoffMapper;
     private final WasteStockMapper wasteStockMapper;
+    private final WasteCategoryMapper wasteCategoryMapper;
     private final BizNoService bizNoService;
     private final TransactionTemplate txTemplate;
 
@@ -53,19 +56,37 @@ public class TransferManifestRepositoryImpl extends BaseBlockingRepository imple
                                           TreatmentUnitMapper treatmentUnitMapper,
                                           ManifestSignoffMapper manifestSignoffMapper,
                                           WasteStockMapper wasteStockMapper,
+                                          WasteCategoryMapper wasteCategoryMapper,
                                           BizNoService bizNoService,
                                           PlatformTransactionManager transactionManager) {
         this.transferManifestMapper = transferManifestMapper;
         this.treatmentUnitMapper = treatmentUnitMapper;
         this.manifestSignoffMapper = manifestSignoffMapper;
         this.wasteStockMapper = wasteStockMapper;
+        this.wasteCategoryMapper = wasteCategoryMapper;
         this.bizNoService = bizNoService;
         this.txTemplate = new TransactionTemplate(transactionManager);
     }
 
     @Override
     public Mono<TransferManifest> create(TransferManifest manifest, BigDecimal approvedWeight) {
-        return blocking(() -> bizNoService.inLock("EM", () -> {
+        return blocking(() -> bizNoService.inLock("EM", () -> txTemplate.execute(tx -> {
+            // 锁类别行：与「停用名录」互斥。锁里看到停用就挡回，看到启用就照开，
+            // 不会出现名录已停用、却挂着停用之后新开的联单。
+            WasteCategoryPO category = wasteCategoryMapper.selectByCodeForUpdate(manifest.getCategoryCode());
+            if (category == null) {
+                throw new BizException("危废类别不存在");
+            }
+            if (!CategoryStatus.ENABLED.name().equals(category.getStatus())) {
+                throw new BizException("危废类别已停用，不能开具新联单");
+            }
+            // 跨省标志以锁内名录为准：名录刚改成限制，这张跨省单就挡在外面；
+            // 已开出的老联单上的快照值不动，只影响这张新开的。
+            boolean cross = manifest.getCrossProvince() != null && manifest.getCrossProvince() == 1;
+            boolean restricted = category.getCrossProvince() != null && category.getCrossProvince() == 1;
+            if (cross && restricted) {
+                throw new BizException("该危废类别限制跨省转移，不得跨省开具联单");
+            }
             // 锁内复核额度：已开出量 + 本趟量不得盖过计划批复总量
             BigDecimal used = transferManifestMapper.sumTransferWeight(manifest.getPlanId());
             manifest.requireWithinQuota(approvedWeight, used);
@@ -74,7 +95,7 @@ public class TransferManifestRepositoryImpl extends BaseBlockingRepository imple
             po.setManifestNo(bizNoService.nextManifestNo());
             transferManifestMapper.insert(po);
             return TransferManifestPoConverter.toDomain(po);
-        }));
+        })));
     }
 
     @Override

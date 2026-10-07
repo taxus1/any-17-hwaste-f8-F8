@@ -82,6 +82,9 @@ public class TransferManifestAppService {
             WasteSource src = tuple.getT1();
             WasteCategory cat = tuple.getT2();
             TreatmentUnit un = tuple.getT3();
+            if (!cat.isEnabled()) {
+                return Mono.error(new BizException("危废类别已停用，不能开具新联单"));
+            }
             if (!un.isActive()) {
                 return Mono.error(new BizException("处置单位非正常状态，不能接收新联单"));
             }

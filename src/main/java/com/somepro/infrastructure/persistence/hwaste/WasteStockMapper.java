@@ -22,6 +22,16 @@ public interface WasteStockMapper extends BaseMapper<WasteStockPO> {
             + "AND status = 'IN_STOCK'")
     BigDecimal sumInStockWeight(@Param("sourceId") Long sourceId, @Param("categoryCode") String categoryCode);
 
+    /** 该类别在库（IN_STOCK）批次数（停用影响面，不分产废单位）；没有记录时返回 0。 */
+    @Select("SELECT COUNT(*) FROM t_waste_stock "
+            + "WHERE del_flag = 0 AND category_code = #{categoryCode} AND status = 'IN_STOCK'")
+    long countInStockByCategory(@Param("categoryCode") String categoryCode);
+
+    /** 该类别在库（IN_STOCK）重量合计（停用影响面，千克）；没有记录时返回 0。 */
+    @Select("SELECT IFNULL(SUM(weight_kg), 0) FROM t_waste_stock "
+            + "WHERE del_flag = 0 AND category_code = #{categoryCode} AND status = 'IN_STOCK'")
+    BigDecimal sumInStockWeightByCategory(@Param("categoryCode") String categoryCode);
+
     @Select("SELECT MAX(batch_no) FROM t_waste_stock WHERE batch_no LIKE CONCAT(#{prefix}, '%') FOR UPDATE")
     String maxBatchNo(@Param("prefix") String prefix);
 }

@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.github.pagehelper.PageHelper;
 import com.somepro.common.exception.BizException;
+import com.somepro.domain.hwaste.model.CategoryStatus;
 import com.somepro.domain.hwaste.model.SplitItem;
 import com.somepro.domain.hwaste.model.StockStatus;
 import com.somepro.domain.hwaste.model.WasteStock;
@@ -12,6 +13,7 @@ import com.somepro.domain.hwaste.repository.WasteStockRepository;
 import com.somepro.domain.shared.model.PageResult;
 import com.somepro.infrastructure.persistence.base.BaseBlockingRepository;
 import com.somepro.infrastructure.persistence.hwaste.converter.WasteStockPoConverter;
+import com.somepro.infrastructure.persistence.hwaste.po.WasteCategoryPO;
 import com.somepro.infrastructure.persistence.hwaste.po.WasteStockPO;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -35,25 +37,37 @@ import java.util.stream.Collectors;
 public class WasteStockRepositoryImpl extends BaseBlockingRepository implements WasteStockRepository {
 
     private final WasteStockMapper wasteStockMapper;
+    private final WasteCategoryMapper wasteCategoryMapper;
     private final BizNoService bizNoService;
     private final TransactionTemplate txTemplate;
 
-    public WasteStockRepositoryImpl(WasteStockMapper wasteStockMapper, BizNoService bizNoService,
+    public WasteStockRepositoryImpl(WasteStockMapper wasteStockMapper, WasteCategoryMapper wasteCategoryMapper,
+                                    BizNoService bizNoService,
                                     PlatformTransactionManager transactionManager) {
         this.wasteStockMapper = wasteStockMapper;
+        this.wasteCategoryMapper = wasteCategoryMapper;
         this.bizNoService = bizNoService;
         this.txTemplate = new TransactionTemplate(transactionManager);
     }
 
     @Override
     public Mono<WasteStock> inbound(WasteStock stock) {
-        return blocking(() -> bizNoService.inLock("WB", () -> {
+        return blocking(() -> bizNoService.inLock("WB", () -> txTemplate.execute(tx -> {
+            // 锁类别行：与「停用名录」互斥。锁里看到停用就挡回，看到启用才登新入库，
+            // 停用之后不会再冒出该类别的新批次。
+            WasteCategoryPO category = wasteCategoryMapper.selectByCodeForUpdate(stock.getCategoryCode());
+            if (category == null) {
+                throw new BizException("危废类别不存在");
+            }
+            if (!CategoryStatus.ENABLED.name().equals(category.getStatus())) {
+                throw new BizException("危废类别已停用，禁止入库");
+            }
             WasteStockPO po = WasteStockPoConverter.toPo(stock);
             po.setId(IdUtil.getSnowflakeNextId());
             po.setBatchNo(bizNoService.nextBatchNo());
             wasteStockMapper.insert(po);
             return WasteStockPoConverter.toDomain(po);
-        }));
+        })));
     }
 
     @Override

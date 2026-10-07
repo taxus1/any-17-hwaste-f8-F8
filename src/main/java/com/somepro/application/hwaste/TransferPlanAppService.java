@@ -58,6 +58,9 @@ public class TransferPlanAppService {
                     .switchIfEmpty(Mono.error(new BizException("产废单位不存在")))
                     .then(wasteCategoryRepository.findByCode(plan.getCategoryCode()))
                     .switchIfEmpty(Mono.error(new BizException("危废类别不存在")))
+                    .flatMap(category -> category.isEnabled()
+                            ? Mono.empty()
+                            : Mono.error(new BizException("危废类别已停用，不能新建转移计划")))
                     .then(transferPlanRepository.create(plan));
         });
     }

@@ -5,6 +5,7 @@ import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
 import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.github.pagehelper.PageHelper;
 import com.somepro.common.exception.BizException;
+import com.somepro.domain.hwaste.model.CategoryStatus;
 import com.somepro.domain.hwaste.model.PlanStatus;
 import com.somepro.domain.hwaste.model.TransferPlan;
 import com.somepro.domain.hwaste.repository.TransferPlanRepository;
@@ -12,7 +13,10 @@ import com.somepro.domain.shared.model.PageResult;
 import com.somepro.infrastructure.persistence.base.BaseBlockingRepository;
 import com.somepro.infrastructure.persistence.hwaste.converter.TransferPlanPoConverter;
 import com.somepro.infrastructure.persistence.hwaste.po.TransferPlanPO;
+import com.somepro.infrastructure.persistence.hwaste.po.WasteCategoryPO;
 import org.springframework.stereotype.Repository;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 import reactor.core.publisher.Mono;
 
 import java.util.List;
@@ -31,16 +35,32 @@ import java.util.stream.Collectors;
 public class TransferPlanRepositoryImpl extends BaseBlockingRepository implements TransferPlanRepository {
 
     private final TransferPlanMapper transferPlanMapper;
+    private final WasteCategoryMapper wasteCategoryMapper;
     private final BizNoService bizNoService;
+    private final TransactionTemplate txTemplate;
 
-    public TransferPlanRepositoryImpl(TransferPlanMapper transferPlanMapper, BizNoService bizNoService) {
+    public TransferPlanRepositoryImpl(TransferPlanMapper transferPlanMapper,
+                                      WasteCategoryMapper wasteCategoryMapper,
+                                      BizNoService bizNoService,
+                                      PlatformTransactionManager transactionManager) {
         this.transferPlanMapper = transferPlanMapper;
+        this.wasteCategoryMapper = wasteCategoryMapper;
         this.bizNoService = bizNoService;
+        this.txTemplate = new TransactionTemplate(transactionManager);
     }
 
     @Override
     public Mono<TransferPlan> create(TransferPlan plan) {
-        return blocking(() -> bizNoService.inLock("TP", () -> {
+        return blocking(() -> bizNoService.inLock("TP", () -> txTemplate.execute(tx -> {
+            // 锁类别行：与「停用名录」互斥。停用后不再收该类别的新计划（含新草稿）。
+            WasteCategoryPO category = wasteCategoryMapper.selectByCodeForUpdate(plan.getCategoryCode());
+            if (category == null) {
+                throw new BizException("危废类别不存在");
+            }
+            if (!CategoryStatus.ENABLED.name().equals(category.getStatus())) {
+                throw new BizException("危废类别已停用，不能新建转移计划");
+            }
+            // 同一单位同一类别同一年度只准挂一份（del_flag 由 @TableLogic 自动追加，软删的组合不挡重新立单）
             Long dup = transferPlanMapper.selectCount(Wrappers.<TransferPlanPO>lambdaQuery()
                     .eq(TransferPlanPO::getSourceId, plan.getSourceId())
                     .eq(TransferPlanPO::getCategoryCode, plan.getCategoryCode())
@@ -53,7 +73,7 @@ public class TransferPlanRepositoryImpl extends BaseBlockingRepository implement
             po.setPlanNo(bizNoService.nextPlanNo(plan.getPlanYear()));
             transferPlanMapper.insert(po);
             return TransferPlanPoConverter.toDomain(po);
-        }));
+        })));
     }
 
     @Override
