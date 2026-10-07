@@ -22,7 +22,7 @@ import java.time.LocalDate;
  * 电子转移联单用例编排（应用层）：提交 → 审批 / 退回 → 启运 → 签收，以及详情与多条件翻页。
  *
  * 提交一道道过门槛（规则落在领域对象，这里只做编排）：
- * 1. 产废单位、危废类别、处置单位都得真实存在；
+ * 1. 产废单位、危废类别、处置单位都得真实存在，且产废单位得处在正常 ACTIVE；
  * 2. 处置单位得处在正常 ACTIVE，且这趟货的类别在对方能接的范围里；
  * 3. 得有一份对得上的年度计划（同单位 + 同类别 + 同年度）且已批复 APPROVED，
  *    草稿、还没批、被驳回的都开不出联单；
@@ -82,6 +82,9 @@ public class TransferManifestAppService {
             WasteSource src = tuple.getT1();
             WasteCategory cat = tuple.getT2();
             TreatmentUnit un = tuple.getT3();
+            if (!src.isActive()) {
+                return Mono.error(new BizException("产废单位非正常状态，不能开具新联单"));
+            }
             if (!cat.isEnabled()) {
                 return Mono.error(new BizException("危废类别已停用，不能开具新联单"));
             }
