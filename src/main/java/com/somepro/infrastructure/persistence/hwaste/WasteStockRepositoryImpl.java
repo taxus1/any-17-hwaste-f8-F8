@@ -6,6 +6,7 @@ import com.baomidou.mybatisplus.core.toolkit.Wrappers;
 import com.github.pagehelper.PageHelper;
 import com.somepro.common.exception.BizException;
 import com.somepro.domain.hwaste.model.CategoryStatus;
+import com.somepro.domain.hwaste.model.SourceStatus;
 import com.somepro.domain.hwaste.model.SplitItem;
 import com.somepro.domain.hwaste.model.StockStatus;
 import com.somepro.domain.hwaste.model.WasteStock;
@@ -14,6 +15,7 @@ import com.somepro.domain.shared.model.PageResult;
 import com.somepro.infrastructure.persistence.base.BaseBlockingRepository;
 import com.somepro.infrastructure.persistence.hwaste.converter.WasteStockPoConverter;
 import com.somepro.infrastructure.persistence.hwaste.po.WasteCategoryPO;
+import com.somepro.infrastructure.persistence.hwaste.po.WasteSourcePO;
 import com.somepro.infrastructure.persistence.hwaste.po.WasteStockPO;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -38,14 +40,17 @@ public class WasteStockRepositoryImpl extends BaseBlockingRepository implements 
 
     private final WasteStockMapper wasteStockMapper;
     private final WasteCategoryMapper wasteCategoryMapper;
+    private final WasteSourceMapper wasteSourceMapper;
     private final BizNoService bizNoService;
     private final TransactionTemplate txTemplate;
 
     public WasteStockRepositoryImpl(WasteStockMapper wasteStockMapper, WasteCategoryMapper wasteCategoryMapper,
+                                    WasteSourceMapper wasteSourceMapper,
                                     BizNoService bizNoService,
                                     PlatformTransactionManager transactionManager) {
         this.wasteStockMapper = wasteStockMapper;
         this.wasteCategoryMapper = wasteCategoryMapper;
+        this.wasteSourceMapper = wasteSourceMapper;
         this.bizNoService = bizNoService;
         this.txTemplate = new TransactionTemplate(transactionManager);
     }
@@ -53,6 +58,16 @@ public class WasteStockRepositoryImpl extends BaseBlockingRepository implements 
     @Override
     public Mono<WasteStock> inbound(WasteStock stock) {
         return blocking(() -> bizNoService.inLock("WB", () -> txTemplate.execute(tx -> {
+            // 先锁产废单位行、再锁类别行（全库统一「单位 → 类别」加锁顺序，避免死锁）：
+            // 与「停用单位 / 停用名录」互斥。锁里看到单位非正常（停用 / 关闭）就挡回，
+            // 单位停用之后不会再挂出它名下的新批次。
+            WasteSourcePO source = wasteSourceMapper.selectByIdForUpdate(stock.getSourceId());
+            if (source == null) {
+                throw new BizException("产废单位不存在");
+            }
+            if (!SourceStatus.ACTIVE.name().equals(source.getStatus())) {
+                throw new BizException("产废单位非正常状态，禁止入库");
+            }
             // 锁类别行：与「停用名录」互斥。锁里看到停用就挡回，看到启用才登新入库，
             // 停用之后不会再冒出该类别的新批次。
             WasteCategoryPO category = wasteCategoryMapper.selectByCodeForUpdate(stock.getCategoryCode());

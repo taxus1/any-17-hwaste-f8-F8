@@ -8,6 +8,7 @@ import com.somepro.common.exception.BizException;
 import com.somepro.domain.hwaste.model.CategoryStatus;
 import com.somepro.domain.hwaste.model.ManifestSignoff;
 import com.somepro.domain.hwaste.model.ManifestStatus;
+import com.somepro.domain.hwaste.model.SourceStatus;
 import com.somepro.domain.hwaste.model.StockStatus;
 import com.somepro.domain.hwaste.model.TransferManifest;
 import com.somepro.domain.hwaste.repository.TransferManifestRepository;
@@ -17,6 +18,7 @@ import com.somepro.infrastructure.persistence.hwaste.converter.TransferManifestP
 import com.somepro.infrastructure.persistence.hwaste.po.ManifestSignoffPO;
 import com.somepro.infrastructure.persistence.hwaste.po.TransferManifestPO;
 import com.somepro.infrastructure.persistence.hwaste.po.WasteCategoryPO;
+import com.somepro.infrastructure.persistence.hwaste.po.WasteSourcePO;
 import com.somepro.infrastructure.persistence.hwaste.po.WasteStockPO;
 import org.springframework.stereotype.Repository;
 import org.springframework.transaction.PlatformTransactionManager;
@@ -49,6 +51,7 @@ public class TransferManifestRepositoryImpl extends BaseBlockingRepository imple
     private final ManifestSignoffMapper manifestSignoffMapper;
     private final WasteStockMapper wasteStockMapper;
     private final WasteCategoryMapper wasteCategoryMapper;
+    private final WasteSourceMapper wasteSourceMapper;
     private final BizNoService bizNoService;
     private final TransactionTemplate txTemplate;
 
@@ -57,6 +60,7 @@ public class TransferManifestRepositoryImpl extends BaseBlockingRepository imple
                                           ManifestSignoffMapper manifestSignoffMapper,
                                           WasteStockMapper wasteStockMapper,
                                           WasteCategoryMapper wasteCategoryMapper,
+                                          WasteSourceMapper wasteSourceMapper,
                                           BizNoService bizNoService,
                                           PlatformTransactionManager transactionManager) {
         this.transferManifestMapper = transferManifestMapper;
@@ -64,6 +68,7 @@ public class TransferManifestRepositoryImpl extends BaseBlockingRepository imple
         this.manifestSignoffMapper = manifestSignoffMapper;
         this.wasteStockMapper = wasteStockMapper;
         this.wasteCategoryMapper = wasteCategoryMapper;
+        this.wasteSourceMapper = wasteSourceMapper;
         this.bizNoService = bizNoService;
         this.txTemplate = new TransactionTemplate(transactionManager);
     }
@@ -71,6 +76,16 @@ public class TransferManifestRepositoryImpl extends BaseBlockingRepository imple
     @Override
     public Mono<TransferManifest> create(TransferManifest manifest, BigDecimal approvedWeight) {
         return blocking(() -> bizNoService.inLock("EM", () -> txTemplate.execute(tx -> {
+            // 先锁产废单位行、再锁类别行（与新入库同一「单位 → 类别」加锁顺序，避免死锁）：
+            // 单位停用与开新联单在这里互斥 —— 锁里看到单位非正常（停用 / 关闭）就挡回，
+            // 停用之后名下年度计划开不出新联单；已开出去在途的老联单不看这里，照走签收 / 处置。
+            WasteSourcePO source = wasteSourceMapper.selectByIdForUpdate(manifest.getSourceId());
+            if (source == null) {
+                throw new BizException("产废单位不存在");
+            }
+            if (!SourceStatus.ACTIVE.name().equals(source.getStatus())) {
+                throw new BizException("产废单位非正常状态，不能开具新联单");
+            }
             // 锁类别行：与「停用名录」互斥。锁里看到停用就挡回，看到启用就照开，
             // 不会出现名录已停用、却挂着停用之后新开的联单。
             WasteCategoryPO category = wasteCategoryMapper.selectByCodeForUpdate(manifest.getCategoryCode());
